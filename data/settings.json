@@ -1,0 +1,29 @@
+{
+    "username": "admin",
+    "password": "vision2026",
+    "downloadDir": "/home/downloads/IPSWs",
+    "idmPath": "/usr/local/bin/idm",
+    "useIdmByDefault": false,
+    "autoCheckMinutes": 1440,
+    "desktopNotifications": true,
+    "gmailUser": "",
+    "gmailAppPassword": "",
+    "emailAlertsEnabled": true,
+    "lastNotifiedReleaseDate": "",
+    "gmailAccounts": [
+        {
+            "id": "gmail-1785753620530",
+            "email": "rayhanvision@gmail.com",
+            "appPassword": "rbzp dpeg zudr lakc",
+            "isSender": true,
+            "enabled": true
+        },
+        {
+            "id": "gmail-1786368655474",
+            "email": "farid.visiontech@gmail.com",
+            "appPassword": "",
+            "isSender": false,
+            "enabled": true
+        }
+    ]
+}
