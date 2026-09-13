@@ -606,10 +606,11 @@ function initReleasesControls() {
   document.getElementById('btn-export-all-releases')?.addEventListener('click', () => {
     const src = importedReleases.length > 0 ? importedReleases : allReleases;
     if (!src || !src.length) { showToast('No releases available to export.', 'warn'); return; }
-    const firstRel = src.find(r => r.buildid);
-    if (!firstRel) { showToast('No build ID found.', 'warn'); return; }
+    const firstRel = src.find(r => r.buildid || r.name);
+    if (!firstRel) { showToast('No release data found.', 'warn'); return; }
     showToast('Downloading combined .txt export file...', 'info', 2500);
-    const url = `api/releases/export.php?buildid=${encodeURIComponent(firstRel.buildid)}&os=all&name=${encodeURIComponent(firstRel.name || '')}&format=txt`;
+    const buildid = extractBuildId(firstRel) || firstRel.buildid || '';
+    const url = `api/releases/export.php?buildid=${encodeURIComponent(buildid)}&os=all&name=${encodeURIComponent(firstRel.name || '')}&format=txt`;
     const iframe = document.createElement('iframe');
     iframe.style.display = 'none';
     iframe.src = url;
@@ -627,6 +628,7 @@ function initReleasesControls() {
 }
 
 function extractBuildId(rel) {
+  if (!rel) return '';
   if (rel.buildid) return rel.buildid;
   // Extract from name: "macOS 26.6.1 (25G76)" → "25G76"
   const m = (rel.name || '').match(/\(([A-Za-z0-9]+)\)\s*$/);
@@ -634,10 +636,11 @@ function extractBuildId(rel) {
 }
 
 function downloadReleaseTxt(rel, os) {
+  if (!rel) return;
   const buildid = extractBuildId(rel);
-  if (!buildid) { showToast('No build ID found for this release.', 'warn'); return; }
+  if (!buildid && !rel.name) { showToast('No release details found.', 'warn'); return; }
   showToast(`Downloading ${os === 'all' ? 'All Devices' : os.toUpperCase()} .txt list...`, 'info', 2500);
-  const url = `api/releases/export.php?buildid=${encodeURIComponent(buildid)}&os=${encodeURIComponent(os)}&name=${encodeURIComponent(rel.name || '')}&format=txt`;
+  const url = `api/releases/export.php?buildid=${encodeURIComponent(buildid || '')}&os=${encodeURIComponent(os)}&name=${encodeURIComponent(rel.name || '')}&format=txt`;
   const iframe = document.createElement('iframe');
   iframe.style.display = 'none';
   iframe.src = url;
@@ -1126,12 +1129,12 @@ function initCacheExporterModal() {
   const triggerExport = (format) => {
     const relSelect = document.getElementById('cache-rel-select');
     const selectedOpt = relSelect.options[relSelect.selectedIndex];
-    if (!selectedOpt || !selectedOpt.dataset.buildid) {
+    if (!selectedOpt || (!selectedOpt.dataset.buildid && !selectedOpt.dataset.name)) {
       showToast('Please select a valid release build first.', 'warn');
       return;
     }
-    const buildid    = selectedOpt.dataset.buildid;
-    const name       = selectedOpt.dataset.name;
+    const buildid    = selectedOpt.dataset.buildid || '';
+    const name       = selectedOpt.dataset.name || '';
     const devices    = getSelectedCacheDevices();
     const signedOnly = document.getElementById('cache-signed-only')?.checked ? 1 : 0;
 
@@ -1154,7 +1157,7 @@ function initCacheExporterModal() {
   document.getElementById('btn-cache-send-idm')?.addEventListener('click', async () => {
     const relSelect = document.getElementById('cache-rel-select');
     const selectedOpt = relSelect.options[relSelect.selectedIndex];
-    if (!selectedOpt || !selectedOpt.dataset.buildid) {
+    if (!selectedOpt || (!selectedOpt.dataset.buildid && !selectedOpt.dataset.name)) {
       showToast('Please select a valid release build first.', 'warn');
       return;
     }

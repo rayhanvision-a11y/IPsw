@@ -3,13 +3,15 @@ session_start();
 date_default_timezone_set('Asia/Dhaka');
 header('Content-Type: application/json');
 
-if (empty($_SESSION['loggedIn'])) {
+$input = json_decode(file_get_contents('php://input'), true) ?? [];
+$mode  = $input['mode'] ?? 'test'; // 'test' | 'notify'
+
+$isInternal = (!empty($input['internal_key']) && $input['internal_key'] === 'auto_notify');
+
+if (empty($_SESSION['loggedIn']) && !$isInternal) {
     http_response_code(401);
     exit(json_encode(['error' => 'Unauthorized']));
 }
-
-$input = json_decode(file_get_contents('php://input'), true) ?? [];
-$mode  = $input['mode'] ?? 'test'; // 'test' | 'notify'
 
 $settingsPath = __DIR__ . '/../../data/settings.json';
 $settings = file_exists($settingsPath) ? (json_decode(file_get_contents($settingsPath), true) ?? []) : [];
@@ -37,104 +39,37 @@ if (empty($recipients)) {
     exit(json_encode(['error' => 'No enabled Gmail recipients found.']));
 }
 
-// Helper to fetch firmware URLs for a release build (same source as export.php)
+// Helper to fetch firmware URLs for a release build (same fast engine as export.php)
 function getFirmwaresForBuild(string $buildid, string $relname): array {
-    $buildsToQuery = [];
-    if (str_ends_with($buildid, '_combined') || !$buildid) {
-        if (preg_match('/\((.*?)\)/', $relname, $m)) {
-            $versions = array_filter(array_map('trim', explode('/', $m[1])));
-            $cacheFile = __DIR__ . '/../../data/releases_cache.json';
-            if (file_exists($cacheFile)) {
-                $allRels = json_decode(file_get_contents($cacheFile), true) ?? [];
-                $targetOs = 'all';
-                if (stripos($relname, 'macos') !== false)     $targetOs = 'macos';
-                elseif (stripos($relname, 'ipados') !== false) $targetOs = 'ipados';
-                elseif (stripos($relname, 'ios') !== false)    $targetOs = 'ios';
-                elseif (stripos($relname, 'watchos') !== false)$targetOs = 'watchos';
-                elseif (stripos($relname, 'tvos') !== false)   $targetOs = 'tvos';
-                elseif (stripos($relname, 'visionos') !== false)$targetOs = 'visionos';
-
-                foreach ($versions as $v) {
-                    $cleanV = preg_replace('/^(iOS|iPadOS|macOS|watchOS|tvOS|visionOS)\s+/i', '', $v);
-                    foreach ($allRels as $r) {
-                        $rType = strtolower($r['type'] ?? '');
-                        if (($targetOs === 'all' || $rType === $targetOs) && str_contains($r['name'], $cleanV) && !empty($r['buildid'])) {
-                            $buildsToQuery[] = $r['buildid'];
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        $buildsToQuery = array_filter(array_map('trim', explode(',', $buildid)));
+    $version = '';
+    if (preg_match('/(\d+(?:\.\d+)+)/', $relname, $m)) {
+        $version = $m[1];
     }
 
-    $deviceMap = [];
-    $buildCacheFile = __DIR__ . '/../../data/build_urls_cache.json';
-
-    foreach ($buildsToQuery as $bid) {
-        if (file_exists($buildCacheFile)) {
-            $buildMap = json_decode(file_get_contents($buildCacheFile), true);
-            if (is_array($buildMap) && !empty($buildMap[$bid])) {
-                foreach ($buildMap[$bid] as $fw) {
-                    $url   = $fw['url'] ?? '';
-                    $devId = $fw['identifier'] ?? ('dev_' . count($deviceMap));
-                    if (!$url) continue;
-
-                    $isIpsw = str_ends_with(strtolower($url), '.ipsw');
-                    if (!isset($deviceMap[$devId])) {
-                        $deviceMap[$devId] = [
-                            'identifier' => $devId,
-                            'url'        => $url,
-                            'signed'     => $fw['signed'] ?? true,
-                            'filesize'   => $fw['filesize'] ?? 0,
-                        ];
-                    } else {
-                        $existingUrl    = $deviceMap[$devId]['url'] ?? '';
-                        $existingIsIpsw = str_ends_with(strtolower($existingUrl), '.ipsw');
-                        if (!$existingIsIpsw && $isIpsw) {
-                            $deviceMap[$devId] = [
-                                'identifier' => $devId,
-                                'url'        => $url,
-                                'signed'     => $fw['signed'] ?? true,
-                                'filesize'   => $fw['filesize'] ?? 0,
-                            ];
-                        }
-                    }
-                }
-            }
-        }
+    $versionsToTry = array_filter(array_unique([$buildid, $version]));
+    if ($version && substr_count($version, '.') >= 2) {
+        $parts = explode('.', $version);
+        $versionsToTry[] = $parts[0] . '.' . $parts[1];
     }
 
-    $out = array_values($deviceMap);
-    if (!empty($out)) return $out;
+    foreach ($versionsToTry as $v) {
+        if (!$v || str_starts_with($v, 'rel_') || str_ends_with($v, '_combined')) continue;
 
-    if (!empty($buildsToQuery)) {
-        $firstBid = $buildsToQuery[0];
-        $version = '';
-        if (preg_match('/(\d+(?:\.\d+)+)\s*\(/', $relname, $m)) {
-            $version = $m[1];
-        }
-        
-        $ch = curl_init();
-        $url = $version ? "https://api.ipsw.me/v4/ipsw/" . urlencode($version) . "/" . urlencode($firstBid) : "https://api.ipsw.me/v4/releases";
+        $ch = curl_init("https://api.ipsw.me/v4/ipsw/" . urlencode($v));
         curl_setopt_array($ch, [
-            CURLOPT_URL            => $url,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 12,
+            CURLOPT_TIMEOUT        => 4,
             CURLOPT_USERAGENT      => 'IPSW-Master/1.0',
             CURLOPT_SSL_VERIFYPEER => false,
             CURLOPT_SSL_VERIFYHOST => false,
         ]);
         $body = curl_exec($ch);
         curl_close($ch);
-        
+
         $items = json_decode($body, true);
-        if (is_array($items)) {
-            $list = isset($items[0]) && isset($items[0]['url']) ? $items : ($items['firmwares'] ?? []);
+        if (is_array($items) && !empty($items) && isset($items[0]['url'])) {
             $out = [];
-            foreach ($list as $fw) {
+            foreach ($items as $fw) {
                 $u = $fw['url'] ?? '';
                 if ($u) {
                     $out[] = [
@@ -145,9 +80,10 @@ function getFirmwaresForBuild(string $buildid, string $relname): array {
                     ];
                 }
             }
-            return $out;
+            if (!empty($out)) return $out;
         }
     }
+
     return [];
 }
 

@@ -240,7 +240,9 @@ if (!empty($newReleases)) {
 }
 
 // If email alerts enabled and brand new releases detected (on initial populated history), auto-trigger email alert
-if (!empty($settings['emailAlerts']) && !empty($newReleases) && !empty($history)) {
+$emailAlertsActive = !empty($settings['emailAlertsEnabled']) || !empty($settings['emailAlerts']);
+
+if ($emailAlertsActive && !empty($newReleases) && !empty($history)) {
     $ch = curl_init();
     $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
     $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
@@ -249,7 +251,7 @@ if (!empty($settings['emailAlerts']) && !empty($newReleases) && !empty($history)
     curl_setopt_array($ch, [
         CURLOPT_URL            => $baseUrl,
         CURLOPT_POST           => true,
-        CURLOPT_POSTFIELDS     => json_encode(['mode' => 'notify', 'releases' => array_slice($newReleases, 0, 5)]),
+        CURLOPT_POSTFIELDS     => json_encode(['mode' => 'notify', 'releases' => array_slice($newReleases, 0, 5), 'internal_key' => 'auto_notify']),
         CURLOPT_HTTPHEADER     => ['Content-Type: application/json', 'Cookie: ' . ($_SERVER['HTTP_COOKIE'] ?? '')],
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT        => 5,

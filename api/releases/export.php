@@ -48,9 +48,12 @@ if (!$buildid && $relname) {
             }
         }
     }
+    if (!$buildid) {
+        $buildid = 'rel_' . preg_replace('/[^a-zA-Z0-9_\-]/', '_', $relname);
+    }
 }
 
-if (!$buildid) { http_response_code(400); exit('buildid parameter is required'); }
+if (!$buildid && !$relname) { http_response_code(400); exit('buildid or name parameter is required'); }
 
 // Selected device identifiers array (if specific devices were picked)
 $selectedDevices = [];
@@ -182,15 +185,15 @@ if (!function_exists('normaliseFirmwares')) {
     }
 }
 
-// ── Extract version from release name: "iOS 18.5 (22F76)" → "18.5" ──────────
+// ── Extract version from release name: "iOS 26.6.2" → "26.6.2" or "iOS 18.5 (22F76)" → "18.5" ──
 $version = '';
-if (preg_match('/(\d+(?:\.\d+)+)\s*\(/', $relname, $m)) {
+if (preg_match('/(\d+(?:\.\d+)+)/', $relname, $m)) {
     $version = $m[1];
 }
 
 // Parse all build IDs to query
 $buildsToQuery = [];
-if (str_ends_with($buildid, '_combined') || !$buildid) {
+if (str_ends_with($buildid, '_combined') || !$buildid || str_starts_with($buildid, 'rel_')) {
     if (preg_match('/\((.*?)\)/', $relname, $m)) {
         $versions = array_filter(array_map('trim', explode('/', $m[1])));
         $cacheFile = __DIR__ . '/../../data/releases_cache.json';
@@ -223,6 +226,7 @@ if (str_ends_with($buildid, '_combined') || !$buildid) {
 $rawFirmwares = [];
 $buildCacheFile = __DIR__ . '/../../data/build_urls_cache.json';
 
+// Strategy 1: Local cache lookup
 foreach ($buildsToQuery as $bid) {
     $bidFirmwares = [];
     if (file_exists($buildCacheFile)) {
@@ -250,6 +254,43 @@ foreach ($buildsToQuery as $bid) {
     $rawFirmwares = array_merge($rawFirmwares, $bidFirmwares);
 }
 
+// ── Strategy 1.2: Direct Ultra-Fast Version/Build Lookup via ipsw.me API (<0.5s) ──
+if (empty($rawFirmwares)) {
+    $versionsToTry = array_filter(array_unique([$buildid, $version]));
+    if ($version && substr_count($version, '.') >= 2) {
+        $parts = explode('.', $version);
+        $versionsToTry[] = $parts[0] . '.' . $parts[1];
+    }
+
+    foreach ($versionsToTry as $v) {
+        if (!$v || str_starts_with($v, 'rel_') || str_ends_with($v, '_combined')) continue;
+
+        $ipswData = fetchJson("https://api.ipsw.me/v4/ipsw/" . urlencode($v), 4);
+        if (is_array($ipswData) && !empty($ipswData) && isset($ipswData[0]['url'])) {
+            foreach ($ipswData as $fw) {
+                $id = $fw['identifier'] ?? '';
+                $u  = $fw['url'] ?? '';
+                if ($u && matchesOs($id, $prefixes, $selectedDevices)) {
+                    if ($signedOnly && isset($fw['signed']) && !$fw['signed']) continue;
+                    $rawFirmwares[] = [
+                        'identifier' => $id,
+                        'url'        => $u,
+                        'filename'   => basename($u),
+                        'size'       => $fw['filesize'] ?? 0,
+                        'signed'     => $fw['signed'] ?? true,
+                    ];
+                }
+            }
+            if (!empty($rawFirmwares)) {
+                if (!empty($ipswData[0]['buildid']) && (str_starts_with($buildid, 'rel_') || !$buildid)) {
+                    $buildid = $ipswData[0]['buildid'];
+                }
+                break;
+            }
+        }
+    }
+}
+
 // ── Strategy 1.5: Direct Beta IPSW lookup from beta.ipswdl.com ───────────────
 $hasOnlyZips = !empty($rawFirmwares) && empty(array_filter($rawFirmwares, fn($f) => str_ends_with(strtolower($f['url'] ?? ''), '.ipsw')));
 
@@ -271,9 +312,9 @@ if (empty($rawFirmwares) || $hasOnlyZips) {
         // Query beta.ipswdl.com in parallel
         $mh = curl_multi_init();
         $handles = [];
-        foreach (array_slice($devicesToQuery, 0, 80) as $devId) {
+        foreach (array_slice($devicesToQuery, 0, 40) as $devId) {
             $ch = curl_init('https://beta.ipswdl.com/firmware/' . urlencode($devId) . '/' . urlencode($buildid));
-            curl_setopt_array($ch, curlOpts(6));
+            curl_setopt_array($ch, curlOpts(4));
             curl_multi_add_handle($mh, $ch);
             $handles[$devId] = $ch;
         }
@@ -303,63 +344,63 @@ if (empty($rawFirmwares) || $hasOnlyZips) {
     }
 }
 
-// ── Strategy 2: walk device list and match buildid ───────────────────────────
+// ── Strategy 2: walk device list and match buildid (Fast fallback, max 15 devices) ──
 $cacheFile  = __DIR__ . '/../../data/devices_cache.json';
 $allDevices = null;
 
-if (file_exists($cacheFile) && (time() - filemtime($cacheFile)) < 21600) {
-    $allDevices = json_decode(file_get_contents($cacheFile), true);
-}
-if (!is_array($allDevices) || empty($allDevices)) {
-    $allDevices = fetchJson('https://api.ipsw.me/v4/devices', 30);
+if (empty($rawFirmwares) && !str_starts_with($buildid, 'rel_')) {
+    if (file_exists($cacheFile) && (time() - filemtime($cacheFile)) < 21600) {
+        $allDevices = json_decode(file_get_contents($cacheFile), true);
+    }
+    if (!is_array($allDevices) || empty($allDevices)) {
+        $allDevices = fetchJson('https://api.ipsw.me/v4/devices', 10);
+        if (is_array($allDevices)) {
+            @file_put_contents($cacheFile, json_encode($allDevices));
+        }
+    }
+
     if (is_array($allDevices)) {
-        @file_put_contents($cacheFile, json_encode($allDevices));
-    }
-}
-
-if (empty($rawFirmwares) && is_array($allDevices)) {
-    $matchedIds = [];
-    foreach ($allDevices as $dev) {
-        $id = is_array($dev) ? ($dev['identifier'] ?? '') : (string)$dev;
-        if ($id && matchesOs($id, $prefixes, $selectedDevices)) {
-            $matchedIds[] = $id;
+        $matchedIds = [];
+        foreach ($allDevices as $dev) {
+            $id = is_array($dev) ? ($dev['identifier'] ?? '') : (string)$dev;
+            if ($id && matchesOs($id, $prefixes, $selectedDevices)) {
+                $matchedIds[] = $id;
+            }
         }
-    }
 
-    $existingUrls = array_flip(array_column($rawFirmwares, 'url'));
+        $existingUrls = array_flip(array_column($rawFirmwares, 'url'));
 
-    $batches = array_chunk($matchedIds, 15);
-    foreach ($batches as $batch) {
-        $batchReqs = [];
-        foreach ($batch as $id) {
-            $batchReqs[$id . '_ipsw'] = 'https://api.ipsw.me/v4/device/' . urlencode($id) . '?type=ipsw';
-            $batchReqs[$id . '_ota']  = 'https://api.ipsw.me/v4/device/' . urlencode($id) . '?type=ota';
-        }
-        $results = fetchJsonMulti($batchReqs, 15);
-        foreach ($results as $reqKey => $devData) {
-            if (!is_array($devData)) continue;
-            $devId = explode('_', $reqKey)[0];
-            $firmwares = $devData['firmwares'] ?? normaliseFirmwares($devData);
-            foreach ($firmwares as $fw) {
-                $fwBuild = $fw['buildid'] ?? $fw['build_id'] ?? '';
-                if ($fwBuild === $buildid) {
-                    $url = $fw['url'] ?? '';
-                    if ($url && !isset($existingUrls[$url])) {
-                        if ($signedOnly && isset($fw['signed']) && !$fw['signed']) continue;
-                        $rawFirmwares[] = [
-                            'identifier' => $devId,
-                            'url'        => $url,
-                            'filename'   => basename($url),
-                            'size'       => $fw['filesize'] ?? 0,
-                            'signed'     => $fw['signed'] ?? true,
-                        ];
-                        $existingUrls[$url] = true;
+        $batches = array_chunk(array_slice($matchedIds, 0, 15), 15);
+        foreach ($batches as $batch) {
+            $batchReqs = [];
+            foreach ($batch as $id) {
+                $batchReqs[$id . '_ipsw'] = 'https://api.ipsw.me/v4/device/' . urlencode($id) . '?type=ipsw';
+            }
+            $results = fetchJsonMulti($batchReqs, 6);
+            foreach ($results as $reqKey => $devData) {
+                if (!is_array($devData)) continue;
+                $devId = explode('_', $reqKey)[0];
+                $firmwares = $devData['firmwares'] ?? normaliseFirmwares($devData);
+                foreach ($firmwares as $fw) {
+                    $fwBuild = $fw['buildid'] ?? $fw['build_id'] ?? '';
+                    if ($fwBuild === $buildid || ($version && ($fw['version'] ?? '') === $version)) {
+                        $url = $fw['url'] ?? '';
+                        if ($url && !isset($existingUrls[$url])) {
+                            if ($signedOnly && isset($fw['signed']) && !$fw['signed']) continue;
+                            $rawFirmwares[] = [
+                                'identifier' => $devId,
+                                'url'        => $url,
+                                'filename'   => basename($url),
+                                'size'       => $fw['filesize'] ?? 0,
+                                'signed'     => $fw['signed'] ?? true,
+                            ];
+                            $existingUrls[$url] = true;
+                        }
                     }
                 }
             }
+            unset($results, $batchReqs);
         }
-        unset($results, $batchReqs);
-        if (function_exists('gc_collect_cycles')) gc_collect_cycles();
     }
 }
 
